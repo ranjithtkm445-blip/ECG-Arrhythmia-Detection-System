@@ -1,0 +1,18 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+RUN mkdir -p uploads
+
+EXPOSE 7860
+
+ENV PORT=7860
+ENV MPLBACKEND=Agg
+ENV TF_CPP_MIN_LOG_LEVEL=3
+
+CMD ["gunicorn", "app:app", "--timeout", "300", "--workers", "1", "--bind", "0.0.0.0:7860"]
