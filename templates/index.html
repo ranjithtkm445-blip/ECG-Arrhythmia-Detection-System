@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>ECG Arrhythmia Detection System</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+
+  <!-- ================================================ -->
+  <!-- HEADER                                           -->
+  <!-- ================================================ -->
+  <header>
+    <div class="header-inner">
+      <div class="header-left">
+        <span class="header-icon">♥</span>
+        <div>
+          <h1>ECG Arrhythmia Detection</h1>
+          <p>AI-Powered Cardiac Analysis System</p>
+        </div>
+      </div>
+      <div class="header-badges">
+        <span class="badge badge-blue">Random Forest</span>
+        <span class="badge badge-purple">CNN Deep Learning</span>
+        <span class="badge badge-green">MIT-BIH Dataset</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ================================================ -->
+  <!-- MAIN                                             -->
+  <!-- ================================================ -->
+  <main>
+
+    <!-- ============================================== -->
+    <!-- UPLOAD SECTION                                 -->
+    <!-- ============================================== -->
+    <section class="upload-section" id="upload-section">
+      <div class="upload-card">
+
+        <div class="upload-icon">📂</div>
+        <h2>Upload ECG Files</h2>
+        <p class="upload-hint">
+          Select all 3 files together:
+          <strong>.dat</strong>,
+          <strong>.hea</strong> and
+          <strong>.atr</strong>
+        </p>
+
+        <div class="upload-drop-zone" id="drop-zone">
+          <input
+            type="file"
+            id="file-input"
+            multiple
+            accept=".dat,.hea,.atr"
+          />
+          <div class="drop-content" id="drop-content">
+            <span class="drop-icon">⬆️</span>
+            <p>Drag and drop ECG files here</p>
+            <p class="drop-sub">or click to browse</p>
+          </div>
+        </div>
+
+        <!-- Selected files list -->
+        <div class="file-list" id="file-list"></div>
+
+        <!-- Analyze button -->
+        <button
+          class="btn-analyze"
+          id="btn-analyze"
+          disabled
+          onclick="analyzeECG()"
+        >
+          🔍 Analyze ECG
+        </button>
+
+      </div>
+    </section>
+
+    <!-- ============================================== -->
+    <!-- LOADING SECTION                                -->
+    <!-- ============================================== -->
+    <section class="loading-section hidden" id="loading-section">
+      <div class="loading-card">
+        <div class="spinner"></div>
+        <h3 id="loading-text">Analyzing ECG...</h3>
+        <div class="loading-steps">
+          <div class="loading-step" id="step-1">⏳ Filtering signal...</div>
+          <div class="loading-step" id="step-2">⏳ Detecting R-peaks...</div>
+          <div class="loading-step" id="step-3">⏳ Extracting features...</div>
+          <div class="loading-step" id="step-4">⏳ Running Random Forest...</div>
+          <div class="loading-step" id="step-5">⏳ Running CNN...</div>
+          <div class="loading-step" id="step-6">⏳ Generating report...</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================== -->
+    <!-- RESULTS SECTION                                -->
+    <!-- ============================================== -->
+    <section class="results-section hidden" id="results-section">
+
+      <!-- VERDICT BANNER -->
+      <div class="verdict-banner" id="verdict-banner">
+        <div class="verdict-icon" id="verdict-icon">✅</div>
+        <div class="verdict-text">
+          <h2 id="verdict-title">NO ARRHYTHMIA DETECTED</h2>
+          <p  id="verdict-detail">Rhythm appears normal</p>
+        </div>
+      </div>
+
+      <!-- INFO BAR -->
+      <div class="info-bar">
+        <div class="info-item">
+          <span class="info-label">Record</span>
+          <span class="info-value" id="info-record">—</span>
+        </div>
+        <div class="info-item">
+          <span class="info-label">Duration</span>
+          <span class="info-value" id="info-duration">—</span>
+        </div>
+        <div class="info-item">
+          <span class="info-label">Total Beats</span>
+          <span class="info-value" id="info-beats">—</span>
+        </div>
+        <div class="info-item">
+          <span class="info-label">RF Accuracy</span>
+          <span class="info-value" id="info-rf-acc">—</span>
+        </div>
+        <div class="info-item">
+          <span class="info-label">CNN Accuracy</span>
+          <span class="info-value" id="info-cnn-acc">—</span>
+        </div>
+        <div class="info-item">
+          <span class="info-label">Agreement</span>
+          <span class="info-value" id="info-agreement">—</span>
+        </div>
+      </div>
+
+      <!-- ECG WAVEFORM -->
+      <div class="panel">
+        <h3 class="panel-title">
+          📈 ECG Waveform — Color Coded by Beat Type
+        </h3>
+        <div class="ecg-container">
+          <img id="ecg-plot" src="" alt="ECG Waveform" />
+        </div>
+        <div class="ecg-legend">
+          <span class="legend-dot green"></span> Normal (N)
+          &nbsp;&nbsp;
+          <span class="legend-dot orange"></span> Atrial (A)
+          &nbsp;&nbsp;
+          <span class="legend-dot red"></span> Ventricular (V)
+        </div>
+      </div>
+
+      <!-- CHARTS ROW -->
+      <div class="charts-row">
+        <div class="panel panel-third">
+          <h3 class="panel-title">🔵 RF Beat Distribution</h3>
+          <div class="chart-container">
+            <canvas id="rf-chart"></canvas>
+          </div>
+        </div>
+        <div class="panel panel-third">
+          <h3 class="panel-title">🟣 CNN Beat Distribution</h3>
+          <div class="chart-container">
+            <canvas id="cnn-chart"></canvas>
+          </div>
+        </div>
+        <div class="panel panel-third">
+          <h3 class="panel-title">🤝 RF vs CNN Agreement</h3>
+          <div class="chart-container">
+            <canvas id="agree-chart"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <!-- HEART RATE CHART -->
+      <div class="panel">
+        <h3 class="panel-title">💓 Heart Rate Over Time</h3>
+        <div class="chart-container-wide">
+          <canvas id="hr-chart"></canvas>
+        </div>
+      </div>
+
+      <!-- CLINICAL SUMMARY + MODEL ACCURACY -->
+      <div class="bottom-row">
+
+        <!-- Clinical Summary -->
+        <div class="panel panel-half">
+          <h3 class="panel-title">🏥 Clinical Summary</h3>
+          <div class="summary-grid">
+            <div class="summary-item">
+              <span class="summary-label">Avg Heart Rate</span>
+              <span class="summary-value" id="sum-avg-hr">—</span>
+              <span class="summary-status" id="sum-hr-status">—</span>
+            </div>
+            <div class="summary-item">
+              <span class="summary-label">Min Heart Rate</span>
+              <span class="summary-value" id="sum-min-hr">—</span>
+            </div>
+            <div class="summary-item">
+              <span class="summary-label">Max Heart Rate</span>
+              <span class="summary-value" id="sum-max-hr">—</span>
+            </div>
+            <div class="summary-item">
+              <span class="summary-label">Avg RR Interval</span>
+              <span class="summary-value" id="sum-avg-rr">—</span>
+            </div>
+            <div class="summary-item">
+              <span class="summary-label">ST Deviation</span>
+              <span class="summary-value" id="sum-avg-st">—</span>
+              <span class="summary-status" id="sum-st-status">—</span>
+            </div>
+            <div class="summary-item">
+              <span class="summary-label">RF Risk Level</span>
+              <span class="summary-value" id="sum-rf-risk">—</span>
+            </div>
+            <div class="summary-item">
+              <span class="summary-label">CNN Risk Level</span>
+              <span class="summary-value" id="sum-cnn-risk">—</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Model Accuracy -->
+        <div class="panel panel-half">
+          <h3 class="panel-title">📊 Model Accuracy Comparison</h3>
+          <div class="chart-container">
+            <canvas id="acc-chart"></canvas>
+          </div>
+          <div class="per-class-table" id="per-class-table"></div>
+        </div>
+
+      </div>
+
+      <!-- ============================================ -->
+      <!-- EXPLANATION PANEL                            -->
+      <!-- ============================================ -->
+      <div class="panel" id="explanation-panel">
+        <h3 class="panel-title">
+          🔬 Clinical Explanation &amp; Analysis
+        </h3>
+
+        <!-- Why detected -->
+        <div class="explanation-section">
+          <h4 class="exp-title">
+            <span class="exp-icon">🎯</span>
+            Why This Was Detected
+          </h4>
+          <ul class="exp-list" id="exp-why"></ul>
+        </div>
+
+        <!-- Features triggered -->
+        <div class="explanation-section">
+          <h4 class="exp-title">
+            <span class="exp-icon">📊</span>
+            Features That Triggered Detection
+          </h4>
+          <ul class="exp-list" id="exp-features"></ul>
+        </div>
+
+        <!-- Beat breakdown -->
+        <div class="explanation-section">
+          <h4 class="exp-title">
+            <span class="exp-icon">💓</span>
+            Beat by Beat Breakdown
+          </h4>
+          <div id="exp-breakdown"></div>
+        </div>
+
+        <!-- Clinical interpretation -->
+        <div class="explanation-section">
+          <h4 class="exp-title">
+            <span class="exp-icon">🏥</span>
+            Clinical Interpretation
+          </h4>
+          <div class="exp-clinical" id="exp-clinical"></div>
+        </div>
+
+        <!-- Next steps -->
+        <div class="explanation-section">
+          <h4 class="exp-title">
+            <span class="exp-icon">📋</span>
+            Recommended Next Steps
+          </h4>
+          <ul class="exp-list exp-steps" id="exp-steps"></ul>
+        </div>
+
+        <!-- Disclaimer -->
+        <div class="exp-disclaimer">
+          ⚠️ <strong>Disclaimer:</strong> This analysis is generated
+          by an AI system for research and educational purposes only.
+          It is <strong>NOT</strong> a substitute for professional
+          medical diagnosis. Always consult a qualified cardiologist
+          for medical advice.
+        </div>
+
+      </div>
+
+      <!-- ANALYZE ANOTHER -->
+      <div class="analyze-another">
+        <button class="btn-reset" onclick="resetApp()">
+          🔄 Analyze Another ECG
+        </button>
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- ================================================ -->
+  <!-- FOOTER                                           -->
+  <!-- ================================================ -->
+  <footer>
+    <p>
+      ECG Arrhythmia Detection System &nbsp;|&nbsp;
+      MIT-BIH Arrhythmia Database &nbsp;|&nbsp;
+      Random Forest + CNN Deep Learning &nbsp;|&nbsp;
+      Built with Flask + TensorFlow
+    </p>
+  </footer>
+
+  <script src="/static/script.js"></script>
+</body>
+</html>
