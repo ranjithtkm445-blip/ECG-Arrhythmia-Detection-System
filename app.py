@@ -1,613 +1,835 @@
 # app.py
-# Purpose: Streamlit app — MultiTaskOmicsNet inference
-#          Image only → Tumor/Normal + Genomic Profile + Diffusion Generation
-# Project: Omics-Guided Histopathology Analysis
-# Author : Ranjith Kumar
+# Purpose: Flask backend for ECG Arrhythmia Detection Web App
+# Updated: Added full clinical explanation generator
+# Run with: python app.py
 
-import os
-import io
-import re
+from flask import Flask, request, jsonify, render_template
 import numpy as np
 import pandas as pd
-from PIL import Image
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torchvision.models import efficientnet_b0
+import pickle
+import os
+import base64
+import io
+import tensorflow as tf
+import wfdb
 import matplotlib
-matplotlib.use("Agg")
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import cv2
-import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-import streamlit as st
+from scipy.signal import butter, filtfilt, find_peaks
+import warnings
+warnings.filterwarnings('ignore')
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-# ──────────────────────────────────────────────
-# PATHS
-# ──────────────────────────────────────────────
-BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH   = os.path.join(BASE_DIR, "models",   "multitask_omics_best.pth")
-DIFF_PATH    = os.path.join(BASE_DIR, "diffusion","diffusion_model.pth")
-SAMPLES_DIR  = os.path.join(BASE_DIR, "test_samples")
+app = Flask(__name__)
 
-GENOMIC_FEATURES = [
-    "BRCA1_mutation","TP53_mutation","HER2_amplification",
-    "PIK3CA_mutation","CDH1_mutation","genomic_risk_score"
-]
-GENOMIC_LABELS = ["BRCA1","TP53","HER2","PIK3CA","CDH1","Risk Score"]
+# -------------------------------------------------------
+# SECTION 1: Configuration
+# -------------------------------------------------------
 
-PCAM_MEAN = np.array([0.701, 0.538, 0.692])
-PCAM_STD  = np.array([0.235, 0.277, 0.213])
+MODEL_DIR     = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_FOLDER = os.path.join(MODEL_DIR, 'uploads')
+WINDOW_BEFORE = int(0.250 * 360)
+WINDOW_AFTER  = int(0.400 * 360)
+SEGMENT_LEN   = WINDOW_BEFORE + WINDOW_AFTER
 
-IMAGE_FEAT_DIM = 256
-FUSION_DIM     = 128
-NUM_CLASSES    = 2
-GENOMIC_DIM    = 6
-DROPOUT        = 0.3
-COND_DIM       = 64
-IMAGE_SIZE     = 32
-CHANNELS       = 3
-T_STEPS        = 100
+LABEL_MAP = {
+    'N': 'N', 'L': 'N', 'R': 'N',
+    'e': 'N', 'j': 'N', 'B': 'N',
+    'V': 'V', 'E': 'V',
+    'A': 'A', 'a': 'A', 'J': 'A',
+    'S': 'A', 'F': 'A',
+}
+SKIP_LABELS = ['+', '~', '|', 'Q', 'U', 'f', 'x']
 
+# -------------------------------------------------------
+# SECTION 2: Load Models at Startup
+# -------------------------------------------------------
 
-# ──────────────────────────────────────────────
-# MULTI-TASK CLASSIFIER
-# ──────────────────────────────────────────────
-class ImageEncoder(nn.Module):
-    def __init__(self):
-        super().__init__()
-        # Load architecture only — weights loaded from our trained .pth file
-        base = efficientnet_b0(weights=None)
-        self.features  = base.features
-        self.avgpool   = base.avgpool
-        self.projector = nn.Sequential(
-            nn.Dropout(p=DROPOUT),
-            nn.Linear(1280, IMAGE_FEAT_DIM),
-            nn.BatchNorm1d(IMAGE_FEAT_DIM),
-            nn.ReLU(inplace=True),
-        )
-    def forward(self, x):
-        x = self.features(x)
-        x = self.avgpool(x)
-        x = torch.flatten(x, 1)
-        return self.projector(x)
+print("Loading models...")
 
-class ClassificationHead(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.head = nn.Sequential(
-            nn.Linear(IMAGE_FEAT_DIM, FUSION_DIM),
-            nn.BatchNorm1d(FUSION_DIM),
-            nn.ReLU(inplace=True),
-            nn.Dropout(p=DROPOUT),
-            nn.Linear(FUSION_DIM, NUM_CLASSES),
-        )
-    def forward(self, x): return self.head(x)
+with open(os.path.join(MODEL_DIR, 'best_model.pkl'), 'rb') as f:
+    rf_model = pickle.load(f)
 
-class GenomicRegressionHead(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.head = nn.Sequential(
-            nn.Linear(IMAGE_FEAT_DIM, FUSION_DIM),
-            nn.BatchNorm1d(FUSION_DIM),
-            nn.ReLU(inplace=True),
-            nn.Dropout(p=DROPOUT),
-            nn.Linear(FUSION_DIM, GENOMIC_DIM),
-            nn.Sigmoid()
-        )
-    def forward(self, x): return self.head(x)
+with open(os.path.join(MODEL_DIR, 'scaler.pkl'), 'rb') as f:
+    scaler = pickle.load(f)
 
-class MultiTaskOmicsNet(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.image_encoder = ImageEncoder()
-        self.cls_head      = ClassificationHead()
-        self.genomic_head  = GenomicRegressionHead()
-    def forward(self, images):
-        features     = self.image_encoder(images)
-        cls_logits   = self.cls_head(features)
-        genomic_pred = self.genomic_head(features)
-        return cls_logits, genomic_pred
+cnn_model = tf.keras.models.load_model(
+    os.path.join(MODEL_DIR, 'cnn_model.keras'),
+    compile=False)
 
+with open(os.path.join(MODEL_DIR, 'cnn_encoder.pkl'), 'rb') as f:
+    encoder = pickle.load(f)
 
-# ──────────────────────────────────────────────
-# DIFFUSION MODEL
-# ──────────────────────────────────────────────
-class SinusoidalTimeEmbedding(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-    def forward(self, t):
-        device = t.device
-        half   = self.dim // 2
-        freqs  = torch.exp(
-            -torch.log(torch.tensor(10000.0)) *
-            torch.arange(half, device=device) / half
-        )
-        args = t[:, None].float() * freqs[None]
-        return torch.cat([args.sin(), args.cos()], dim=-1)
+print("Models loaded successfully!")
 
-class ResidualBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, time_dim, cond_dim):
-        super().__init__()
-        self.conv1    = nn.Conv2d(in_ch,  out_ch, 3, padding=1)
-        self.conv2    = nn.Conv2d(out_ch, out_ch, 3, padding=1)
-        self.bn1      = nn.GroupNorm(8, out_ch)
-        self.bn2      = nn.GroupNorm(8, out_ch)
-        self.time_mlp = nn.Linear(time_dim, out_ch)
-        self.cond_mlp = nn.Linear(cond_dim, out_ch)
-        self.skip     = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
-    def forward(self, x, t_emb, c_emb):
-        h = F.silu(self.bn1(self.conv1(x)))
-        h = h + self.time_mlp(t_emb)[:, :, None, None]
-        h = h + self.cond_mlp(c_emb)[:, :, None, None]
-        h = F.silu(self.bn2(self.conv2(h)))
-        return h + self.skip(x)
+# -------------------------------------------------------
+# SECTION 3: Helper Functions
+# -------------------------------------------------------
 
-class DownBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, time_dim, cond_dim):
-        super().__init__()
-        self.res  = ResidualBlock(in_ch, out_ch, time_dim, cond_dim)
-        self.down = nn.Conv2d(out_ch, out_ch, 3, stride=2, padding=1)
-    def forward(self, x, t_emb, c_emb):
-        x = self.res(x, t_emb, c_emb)
-        return self.down(x), x
+def bandpass_filter(signal, lowcut=0.5, highcut=40.0, fs=360, order=4):
+    """Bandpass filter to remove ECG noise"""
+    nyquist = 0.5 * fs
+    low     = lowcut / nyquist
+    high    = highcut / nyquist
+    b, a    = butter(order, [low, high], btype='band')
+    return filtfilt(b, a, signal)
 
-class UpBlock(nn.Module):
-    def __init__(self, in_ch, skip_ch, out_ch, time_dim, cond_dim):
-        super().__init__()
-        self.up  = nn.ConvTranspose2d(in_ch, in_ch, 2, stride=2)
-        self.res = ResidualBlock(in_ch + skip_ch, out_ch, time_dim, cond_dim)
-    def forward(self, x, skip, t_emb, c_emb):
-        x = self.up(x)
-        x = torch.cat([x, skip], dim=1)
-        return self.res(x, t_emb, c_emb)
+def detect_r_peaks(signal, fs=360, threshold=0.15):
+    """Adaptive R-peak detection"""
+    diff_signal   = np.diff(signal)
+    squared       = diff_signal ** 2
+    window_size   = int(0.150 * fs)
+    kernel        = np.ones(window_size) / window_size
+    integrated    = np.convolve(squared, kernel, mode='same')
+    min_distance  = int(0.200 * fs)
+    height_thresh = np.percentile(integrated, 100 * (1 - threshold))
+    r_peaks, _    = find_peaks(integrated,
+                                distance=min_distance,
+                                height=height_thresh)
+    return r_peaks
 
-class ConditionalUNet(nn.Module):
-    def __init__(self):
-        super().__init__()
-        TIME_DIM = 128
-        self.time_embed = nn.Sequential(
-            SinusoidalTimeEmbedding(TIME_DIM),
-            nn.Linear(TIME_DIM, TIME_DIM), nn.SiLU(),
-            nn.Linear(TIME_DIM, TIME_DIM),
-        )
-        self.cond_embed = nn.Sequential(
-            nn.Linear(GENOMIC_DIM, 32), nn.SiLU(),
-            nn.Linear(32, COND_DIM),
-        )
-        self.enc1       = DownBlock(CHANNELS, 32,  TIME_DIM, COND_DIM)
-        self.enc2       = DownBlock(32,       64,  TIME_DIM, COND_DIM)
-        self.enc3       = DownBlock(64,       128, TIME_DIM, COND_DIM)
-        self.bottleneck = ResidualBlock(128, 128, TIME_DIM, COND_DIM)
-        self.dec3       = UpBlock(128, 128, 64, TIME_DIM, COND_DIM)
-        self.dec2       = UpBlock( 64,  64, 32, TIME_DIM, COND_DIM)
-        self.dec1       = UpBlock( 32,  32, 32, TIME_DIM, COND_DIM)
-        self.out        = nn.Conv2d(32, CHANNELS, 1)
-    def forward(self, x, t, genomic):
-        t_emb = self.time_embed(t)
-        c_emb = self.cond_embed(genomic)
-        x, s1 = self.enc1(x, t_emb, c_emb)
-        x, s2 = self.enc2(x, t_emb, c_emb)
-        x, s3 = self.enc3(x, t_emb, c_emb)
-        x = self.bottleneck(x, t_emb, c_emb)
-        x = self.dec3(x, s3, t_emb, c_emb)
-        x = self.dec2(x, s2, t_emb, c_emb)
-        x = self.dec1(x, s1, t_emb, c_emb)
-        return self.out(x)
+def assess_risk(predictions):
+    """Assess cardiac risk based on beat classifications"""
+    counts  = pd.Series(predictions).value_counts()
+    v_count = counts.get('V', 0)
+    a_count = counts.get('A', 0)
+    total   = len(predictions)
+    v_pct   = v_count / total * 100
+    a_pct   = a_count / total * 100
+    if v_pct > 10 or v_count > 100:
+        return 'HIGH RISK'
+    elif v_pct > 2 or a_pct > 5 or a_count > 30:
+        return 'MODERATE'
+    else:
+        return 'LOW RISK'
 
-
-# ──────────────────────────────────────────────
-# GRAD-CAM
-# ──────────────────────────────────────────────
-class GradCAM:
-    def __init__(self, model):
-        self.model       = model
-        self.gradients   = None
-        self.activations = None
-        target = model.image_encoder.features[-1]
-        target.register_forward_hook(self._save_activation)
-        target.register_full_backward_hook(self._save_gradient)
-    def _save_activation(self, module, input, output):
-        self.activations = output.detach()
-    def _save_gradient(self, module, grad_input, grad_output):
-        self.gradients = grad_output[0].detach()
-    def generate(self, img_tensor, class_idx=1):
-        self.model.eval()
-        img_tensor = img_tensor.unsqueeze(0).requires_grad_(True)
-        cls_logits, _ = self.model(img_tensor)
-        self.model.zero_grad()
-        cls_logits[0, class_idx].backward()
-        weights = self.gradients.mean(dim=[2,3], keepdim=True)
-        cam     = (weights * self.activations).sum(dim=1, keepdim=True)
-        cam     = torch.relu(cam).squeeze().numpy()
-        cam     = cv2.resize(cam, (96,96))
-        cam     = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
-        return cam
-
-
-# ──────────────────────────────────────────────
-# UTILITIES
-# ──────────────────────────────────────────────
-@st.cache_resource
-def load_classifier():
-    model = MultiTaskOmicsNet()
-    model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu"))
-    model.eval()
-    return model
-
-@st.cache_resource
-def load_diffusion():
-    ckpt       = torch.load(DIFF_PATH, map_location="cpu")
-    diff_model = ConditionalUNet()
-    diff_model.load_state_dict(ckpt["model_state_dict"])
-    diff_model.eval()
-    return diff_model, ckpt["betas"], ckpt["alphas"], ckpt["alpha_bars"]
-
-@st.cache_data
-def get_sample_files():
-    if not os.path.exists(SAMPLES_DIR):
-        return []
-    return sorted([f for f in os.listdir(SAMPLES_DIR)
-                   if f.endswith((".png",".jpg",".jpeg"))])
-
-def extract_idx(filename):
-    m = re.search(r"idx(\d+)", filename)
-    return int(m.group(1)) if m else -1
-
-def enhance_image(pil_img):
-    img  = np.array(pil_img.convert("RGB"))
-    lab  = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
-    l, a, b = cv2.split(lab)
-    clahe   = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    lab_eq  = cv2.merge([clahe.apply(l), a, b])
-    enhanced  = cv2.cvtColor(lab_eq, cv2.COLOR_LAB2RGB)
-    sharpened = cv2.filter2D(enhanced, -1, np.array([[0,-1,0],[-1,5,-1],[0,-1,0]]))
-    return Image.fromarray(sharpened)
-
-def preprocess(pil_img):
-    img    = pil_img.convert("RGB").resize((96,96))
-    img_np = np.array(img, dtype=np.float32) / 255.0
-    norm   = (img_np - PCAM_MEAN) / PCAM_STD
-    tensor = torch.tensor(norm.transpose(2,0,1), dtype=torch.float32)
-    return tensor, img_np
-
-@torch.no_grad()
-def generate_synthetic(diff_model, genomic_vec, betas, alphas, alpha_bars,
-                       ddim_steps=50, eta=0.0):
+def get_verdict(rf_predictions, cnn_predictions):
     """
-    DDIM sampler — produces sharper images than DDPM.
-    ddim_steps: number of inference steps (50 is enough, vs 100 for DDPM)
-    eta=0.0: deterministic sampling (sharpest output)
-    eta=1.0: stochastic (same as DDPM)
+    Determines arrhythmia verdict using average of RF and CNN.
+
+    Returns:
+        dict with verdict text, type, icon and detail
     """
-    T   = T_STEPS
-    g   = genomic_vec.unsqueeze(0)
-    x   = torch.randn(1, CHANNELS, IMAGE_SIZE, IMAGE_SIZE)
+    total           = len(rf_predictions)
+    rf_counts_dict  = pd.Series(rf_predictions).value_counts().to_dict()
+    cnn_counts_dict = pd.Series(cnn_predictions).value_counts().to_dict()
+    rf_v_pct        = rf_counts_dict.get('V', 0)  / total * 100
+    rf_a_pct        = rf_counts_dict.get('A', 0)  / total * 100
+    cnn_v_pct       = cnn_counts_dict.get('V', 0) / total * 100
+    cnn_a_pct       = cnn_counts_dict.get('A', 0) / total * 100
+    avg_v_pct       = (rf_v_pct  + cnn_v_pct)  / 2
+    avg_a_pct       = (rf_a_pct  + cnn_a_pct)  / 2
+    has_v           = avg_v_pct > 5
+    has_a           = avg_a_pct > 5
 
-    # Build DDIM timestep sequence — evenly spaced subset of [0, T]
-    step_size = T // ddim_steps
-    timesteps = list(reversed(range(0, T, step_size)))  # e.g. [99,97,95,...,1]
+    if has_v and has_a:
+        return {
+            'verdict': 'MULTIPLE ARRHYTHMIAS DETECTED',
+            'type'   : 'danger',
+            'icon'   : '🔴',
+            'detail' : f'Ventricular: {avg_v_pct:.1f}%  |  '
+                       f'Atrial: {avg_a_pct:.1f}%',
+            'v_pct'  : round(avg_v_pct, 1),
+            'a_pct'  : round(avg_a_pct, 1),
+        }
+    elif has_v:
+        return {
+            'verdict': 'VENTRICULAR ARRHYTHMIA DETECTED',
+            'type'   : 'danger',
+            'icon'   : '🔴',
+            'detail' : f'Ventricular beats: {avg_v_pct:.1f}% of total',
+            'v_pct'  : round(avg_v_pct, 1),
+            'a_pct'  : 0,
+        }
+    elif has_a:
+        return {
+            'verdict': 'ATRIAL ARRHYTHMIA DETECTED',
+            'type'   : 'warning',
+            'icon'   : '⚠️',
+            'detail' : f'Atrial beats: {avg_a_pct:.1f}% of total',
+            'v_pct'  : 0,
+            'a_pct'  : round(avg_a_pct, 1),
+        }
+    else:
+        return {
+            'verdict': 'NO ARRHYTHMIA DETECTED',
+            'type'   : 'success',
+            'icon'   : '✅',
+            'detail' : 'Rhythm appears normal',
+            'v_pct'  : 0,
+            'a_pct'  : 0,
+        }
 
-    for i, t_idx in enumerate(timesteps):
-        t_tensor   = torch.tensor([t_idx], dtype=torch.long)
-        pred_noise = diff_model(x, t_tensor, g)
+def generate_explanation(rf_predictions, cnn_predictions,
+                          features_df, verdict_data,
+                          rf_risk, cnn_risk):
+    """
+    Generates detailed clinical explanation for the verdict.
 
-        alpha_bar_t = alpha_bars[t_idx]
+    Parameters:
+        rf_predictions  : RF model predictions array
+        cnn_predictions : CNN model predictions array
+        features_df     : DataFrame with extracted features
+        verdict_data    : verdict dict from get_verdict()
+        rf_risk         : RF risk level string
+        cnn_risk        : CNN risk level string
 
-        # Predict x0
-        x0_pred = (x - torch.sqrt(1 - alpha_bar_t) * pred_noise) / torch.sqrt(alpha_bar_t)
-        x0_pred = x0_pred.clamp(-1, 1)
+    Returns:
+        dict with 5 explanation sections
+    """
+    total           = len(rf_predictions)
+    rf_counts_dict  = pd.Series(rf_predictions).value_counts().to_dict()
+    cnn_counts_dict = pd.Series(cnn_predictions).value_counts().to_dict()
 
-        if i < len(timesteps) - 1:
-            t_prev         = timesteps[i + 1]
-            alpha_bar_prev = alpha_bars[t_prev]
-        else:
-            alpha_bar_prev = torch.tensor(1.0)
+    rf_n  = rf_counts_dict.get('N', 0)
+    rf_a  = rf_counts_dict.get('A', 0)
+    rf_v  = rf_counts_dict.get('V', 0)
+    cnn_n = cnn_counts_dict.get('N', 0)
+    cnn_a = cnn_counts_dict.get('A', 0)
+    cnn_v = cnn_counts_dict.get('V', 0)
 
-        # DDIM update
-        sigma = (eta *
-                 torch.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar_t)) *
-                 torch.sqrt(1 - alpha_bar_t / alpha_bar_prev))
+    avg_v_pct = ((rf_v / total) + (cnn_v / total)) / 2 * 100
+    avg_a_pct = ((rf_a / total) + (cnn_a / total)) / 2 * 100
 
-        direction = torch.sqrt(1 - alpha_bar_prev - sigma**2) * pred_noise
-        noise     = sigma * torch.randn_like(x) if eta > 0 else 0
+    avg_hr  = round(float(features_df['heart_rate_bpm'].mean()), 1)
+    max_hr  = round(float(features_df['heart_rate_bpm'].max()),  1)
+    min_hr  = round(float(features_df['heart_rate_bpm'].min()),  1)
+    avg_rr  = round(float(features_df['rr_interval_ms'].mean()), 1)
+    avg_rrv = round(float(features_df['rr_variability_ms'].mean()), 1)
+    avg_st  = round(float(features_df['st_deviation_mv'].mean()), 4)
 
-        x = torch.sqrt(alpha_bar_prev) * x0_pred + direction + noise
+    verdict_type = verdict_data['type']
 
-    img = (x.clamp(-1, 1) + 1) / 2.0
-    img = F.interpolate(img, size=(96, 96), mode="bicubic", align_corners=False)
-    return img.squeeze(0).permute(1, 2, 0).numpy()
+    # -----------------------------------------------
+    # WHY IT WAS DETECTED
+    # -----------------------------------------------
+    why = []
 
-def make_excel(image_idx, filename, label, confidence, genomic_pred):
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Prediction Report"
-    hdr_fill = PatternFill("solid", start_color="1F4E79")
-    hdr_font = Font(bold=True, color="FFFFFF", name="Arial", size=11)
-    center   = Alignment(horizontal="center", vertical="center")
-    thin     = Border(left=Side(style="thin"), right=Side(style="thin"),
-                      top=Side(style="thin"),  bottom=Side(style="thin"))
-    res_fill = PatternFill("solid",
-               start_color="FFE0E0" if label=="TUMOR" else "E0F0E0")
-    rows = [
-        ["Field",              "Predicted Value"],
-        ["Filename",           filename],
-        ["Image Index",        image_idx],
-        ["Prediction",         label],
-        ["Confidence",         f"{confidence:.2%}"],
-        ["─── Predicted Omics ───", "─────────────────"],
-        ["BRCA1 Mutation",     round(float(genomic_pred[0]),4)],
-        ["TP53 Mutation",      round(float(genomic_pred[1]),4)],
-        ["HER2 Amplification", round(float(genomic_pred[2]),4)],
-        ["PIK3CA Mutation",    round(float(genomic_pred[3]),4)],
-        ["CDH1 Mutation",      round(float(genomic_pred[4]),4)],
-        ["Genomic Risk Score", round(float(genomic_pred[5]),4)],
-        ["─── Note ───",       "Genomic values predicted from image by MultiTaskOmicsNet"],
+    if rf_v > 0:
+        why.append(
+            f'RF model detected {rf_v} Ventricular beats '
+            f'({rf_v/total*100:.1f}% of total)'
+        )
+    if cnn_v > 0:
+        why.append(
+            f'CNN model detected {cnn_v} Ventricular beats '
+            f'({cnn_v/total*100:.1f}% of total)'
+        )
+    if rf_a > 0:
+        why.append(
+            f'RF model detected {rf_a} Atrial beats '
+            f'({rf_a/total*100:.1f}% of total)'
+        )
+    if cnn_a > 0:
+        why.append(
+            f'CNN model detected {cnn_a} Atrial beats '
+            f'({cnn_a/total*100:.1f}% of total)'
+        )
+    if rf_risk == cnn_risk:
+        why.append(
+            f'Both RF and CNN models agree: {rf_risk}'
+        )
+    else:
+        why.append(
+            f'RF assessed {rf_risk} — CNN assessed {cnn_risk}'
+        )
+    if verdict_type == 'success':
+        why.append(
+            'Less than 5% abnormal beats detected by both models'
+        )
+
+    # -----------------------------------------------
+    # FEATURES THAT TRIGGERED DETECTION
+    # -----------------------------------------------
+    features_triggered = []
+
+    if avg_rrv > 100:
+        features_triggered.append(
+            f'RR Variability is HIGH ({avg_rrv}ms avg) — '
+            f'indicates irregular rhythm between beats'
+        )
+    elif avg_rrv > 50:
+        features_triggered.append(
+            f'RR Variability is MODERATE ({avg_rrv}ms avg) — '
+            f'some beat-to-beat irregularity detected'
+        )
+    else:
+        features_triggered.append(
+            f'RR Variability is LOW ({avg_rrv}ms avg) — '
+            f'regular rhythm pattern'
+        )
+
+    if abs(avg_st) > 0.1:
+        features_triggered.append(
+            f'ST Deviation is ABNORMAL ({avg_st}mV) — '
+            f'possible cardiac stress or ischemia'
+        )
+    else:
+        features_triggered.append(
+            f'ST Deviation is normal ({avg_st}mV) — '
+            f'no ischemia signs detected'
+        )
+
+    if max_hr > 100:
+        features_triggered.append(
+            f'Heart rate reached {max_hr} BPM — '
+            f'tachycardia episodes detected'
+        )
+    if min_hr < 60:
+        features_triggered.append(
+            f'Heart rate dropped to {min_hr} BPM — '
+            f'bradycardia episodes detected'
+        )
+
+    features_triggered.append(
+        f'Average RR Interval: {avg_rr}ms '
+        f'(normal range: 600-1000ms)'
+    )
+
+    # -----------------------------------------------
+    # BEAT BY BEAT BREAKDOWN
+    # -----------------------------------------------
+    breakdown = [
+        {
+            'type'   : 'Normal (N)',
+            'rf'     : rf_n,
+            'cnn'    : cnn_n,
+            'pct'    : round(rf_n / total * 100, 1),
+            'meaning': 'Regular heartbeat with normal '
+                       'electrical conduction pathway',
+            'color'  : 'green'
+        },
+        {
+            'type'   : 'Atrial (A)',
+            'rf'     : rf_a,
+            'cnn'    : cnn_a,
+            'pct'    : round(rf_a / total * 100, 1),
+            'meaning': 'Premature beat from atria — '
+                       'PAC or Atrial Fibrillation pattern',
+            'color'  : 'orange'
+        },
+        {
+            'type'   : 'Ventricular (V)',
+            'rf'     : rf_v,
+            'cnn'    : cnn_v,
+            'pct'    : round(rf_v / total * 100, 1),
+            'meaning': 'Premature beat from ventricles — '
+                       'PVC or Ventricular Tachycardia pattern',
+            'color'  : 'red'
+        },
     ]
-    for r, row in enumerate(rows, 1):
-        for c, val in enumerate(row, 1):
-            cell = ws.cell(r, c, value=val)
-            cell.alignment = center; cell.border = thin
-            if r == 1:
-                cell.font = hdr_font; cell.fill = hdr_fill
-            else:
-                cell.font = Font(name="Arial", size=10)
-                cell.fill = res_fill
-    ws.column_dimensions["A"].width = 24
-    ws.column_dimensions["B"].width = 45
+
+    # -----------------------------------------------
+    # CLINICAL INTERPRETATION
+    # -----------------------------------------------
+    clinical = []
+
+    if avg_a_pct > 10:
+        clinical.append(
+            f'HIGH Atrial activity ({avg_a_pct:.1f}%) suggests '
+            f'possible Atrial Fibrillation (AFib) or frequent '
+            f'Premature Atrial Contractions (PAC). AFib is the '
+            f'most common sustained arrhythmia and significantly '
+            f'increases stroke risk. Immediate evaluation recommended.'
+        )
+    elif avg_a_pct > 2:
+        clinical.append(
+            f'MODERATE Atrial activity ({avg_a_pct:.1f}%) detected. '
+            f'Occasional Premature Atrial Contractions (PAC) are '
+            f'common and often benign but should be monitored '
+            f'if symptomatic.'
+        )
+
+    if avg_v_pct > 10:
+        clinical.append(
+            f'HIGH Ventricular activity ({avg_v_pct:.1f}%) suggests '
+            f'possible Premature Ventricular Contractions (PVC) or '
+            f'Ventricular Tachycardia (VT). Frequent PVCs can '
+            f'indicate underlying heart disease and require '
+            f'immediate evaluation.'
+        )
+    elif avg_v_pct > 2:
+        clinical.append(
+            f'MODERATE Ventricular activity ({avg_v_pct:.1f}%) '
+            f'detected. Occasional PVCs can occur in healthy '
+            f'individuals but frequent episodes require monitoring.'
+        )
+
+    if abs(avg_st) > 0.1:
+        clinical.append(
+            f'ST segment deviation of {avg_st}mV detected. '
+            f'Abnormal ST changes can indicate myocardial '
+            f'ischemia, injury, or infarction. '
+            f'Immediate cardiac evaluation is strongly recommended.'
+        )
+    else:
+        clinical.append(
+            f'ST segment deviation of {avg_st}mV is within '
+            f'normal limits. No signs of ischemia detected '
+            f'in this ECG recording.'
+        )
+
+    if avg_hr > 100:
+        clinical.append(
+            f'Average heart rate of {avg_hr} BPM indicates '
+            f'Tachycardia (normal: 60-100 BPM). This can be '
+            f'caused by arrhythmia, stress, dehydration, '
+            f'fever, or underlying cardiac conditions.'
+        )
+    elif avg_hr < 60:
+        clinical.append(
+            f'Average heart rate of {avg_hr} BPM indicates '
+            f'Bradycardia (normal: 60-100 BPM). This may be '
+            f'normal in trained athletes but can also indicate '
+            f'conduction system disease or medication effects.'
+        )
+    else:
+        clinical.append(
+            f'Average heart rate of {avg_hr} BPM is within '
+            f'normal range (60-100 BPM). No rate abnormality '
+            f'detected in this recording.'
+        )
+
+    if verdict_type == 'success':
+        clinical.append(
+            'No significant arrhythmia detected in this ECG. '
+            'Heart rhythm appears normal based on AI analysis. '
+            'Both Random Forest and CNN models agree on '
+            'normal classification.'
+        )
+
+    # -----------------------------------------------
+    # RECOMMENDED NEXT STEPS
+    # -----------------------------------------------
+    if verdict_type == 'danger':
+        next_steps = [
+            '🚨 Consult a cardiologist immediately',
+            '📋 Perform a standard 12-lead ECG for confirmation',
+            '🏥 Consider hospital evaluation if symptomatic',
+            '📱 Request 24-hour Holter monitor study',
+            '💊 Discuss antiarrhythmic medication with your doctor',
+            '⚠️  Avoid strenuous physical activity until evaluated',
+        ]
+    elif verdict_type == 'warning':
+        next_steps = [
+            '👨‍⚕️ Schedule appointment with cardiologist',
+            '📋 Perform a standard 12-lead ECG for confirmation',
+            '📱 Consider 24-hour Holter monitor study',
+            '📝 Keep a symptom diary (palpitations, dizziness)',
+            '🧘 Reduce caffeine, alcohol, and stress',
+            '🔄 Follow up ECG in 3-6 months',
+        ]
+    else:
+        next_steps = [
+            '✅ No immediate action required',
+            '📅 Routine annual cardiac checkup recommended',
+            '🏃 Maintain regular physical activity',
+            '🥗 Continue heart-healthy diet and lifestyle',
+            '📝 Monitor for new symptoms (palpitations, chest pain)',
+            '🔄 Repeat ECG if symptoms develop',
+        ]
+
+    return {
+        'why'               : why,
+        'features_triggered': features_triggered,
+        'breakdown'         : breakdown,
+        'clinical'          : clinical,
+        'next_steps'        : next_steps,
+    }
+
+def generate_ecg_plot(ecg_filtered, valid_r_peaks,
+                       rf_predictions, fs, n_seconds=10):
+    """Generates ECG waveform plot and returns as base64 string"""
+
+    BEAT_COLORS = {'N': '#2ecc71', 'A': '#e67e22', 'V': '#e74c3c'}
+    qrs_before  = int(0.050 * fs)
+    qrs_after   = int(0.050 * fs)
+    n_samples   = min(n_seconds * fs, len(ecg_filtered))
+    time_axis   = np.arange(n_samples) / fs
+
+    fig, ax = plt.subplots(figsize=(14, 4))
+    fig.patch.set_facecolor('#1a1a2e')
+    ax.set_facecolor('#1a1a2e')
+
+    ax.plot(time_axis, ecg_filtered[:n_samples],
+            color='#4a9eff', linewidth=0.8, alpha=0.9)
+
+    r_in_window = valid_r_peaks[valid_r_peaks < n_samples]
+    for r in r_in_window:
+        idx = np.where(valid_r_peaks == r)[0]
+        if len(idx) == 0:
+            continue
+        pred  = rf_predictions[idx[0]]
+        color = BEAT_COLORS.get(pred, 'white')
+        ax.scatter(r/fs, ecg_filtered[r],
+                   color=color, s=60, zorder=3)
+        ax.axvspan((r - qrs_before)/fs,
+                   (r + qrs_after)/fs,
+                   alpha=0.15, color=color)
+
+    import matplotlib.patches as mpatches
+    patches = [
+        mpatches.Patch(color='#2ecc71', label='Normal'),
+        mpatches.Patch(color='#e67e22', label='Atrial'),
+        mpatches.Patch(color='#e74c3c', label='Ventricular'),
+    ]
+    ax.legend(handles=patches, loc='upper right',
+              facecolor='#1a1a2e', edgecolor='#444444',
+              labelcolor='white', fontsize=9)
+
+    ax.set_xlabel('Time (seconds)', color='#aaaaaa')
+    ax.set_ylabel('Amplitude (mV)', color='#aaaaaa')
+    ax.tick_params(colors='#aaaaaa')
+    ax.spines['bottom'].set_color('#444444')
+    ax.spines['left'].set_color('#444444')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.grid(True, alpha=0.15, color='#555555')
+
+    plt.tight_layout()
     buf = io.BytesIO()
-    wb.save(buf); buf.seek(0)
-    return buf
+    plt.savefig(buf, format='png', dpi=120,
+                facecolor=fig.get_facecolor())
+    plt.close()
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode('utf-8')
 
+# -------------------------------------------------------
+# SECTION 4: Routes
+# -------------------------------------------------------
 
-# ──────────────────────────────────────────────
-# MAIN APP
-# ──────────────────────────────────────────────
-def main():
-    st.set_page_config(
-        page_title="OmicsGuidedNet",
-        page_icon="🔬",
-        layout="wide"
-    )
+@app.route('/')
+def index():
+    """Serve the main HTML page"""
+    return render_template('index.html')
+@app.route('/test')
+def test():
+    """Test route to confirm server is running"""
+    return jsonify({
+        'status' : 'Server is running',
+        'models' : 'RF + CNN loaded',
+        'message': 'Ready to analyze ECG'
+    })
 
-    st.markdown("""
-    <h1 style='text-align:center;color:#1F4E79;'>🔬 OmicsGuidedNet</h1>
-    <p style='text-align:center;color:#888;font-size:15px;'>
-        Multi-Task Biomarker Discovery — Image → Tumor/Normal + Genomic Profile
-    </p>
-    <hr>
-    """, unsafe_allow_html=True)
+@app.route('/analyze', methods=['POST'])
+def analyze():
+    """
+    Main analysis endpoint.
+    Receives .dat + .hea + .atr files
+    Returns full analysis + explanation as JSON
+    """
 
-    # Load models
-    with st.spinner("Loading models..."):
-        classifier                        = load_classifier()
-        gradcam                           = GradCAM(classifier)
-        diff_model, betas, alphas, alpha_bars = load_diffusion()
-        samples                           = get_sample_files()
+    try:
+        if 'dat_file' not in request.files:
+            return jsonify({'error': 'No .dat file uploaded'}), 400
 
-    # Sidebar
-    st.sidebar.header("⚙️ Settings")
-    enhance  = st.sidebar.checkbox("Enhance image (CLAHE + Sharpen)", value=True)
-    gen_diff = st.sidebar.checkbox("Generate diffusion patch",         value=True)
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("**Classifier:** MultiTaskOmicsNet")
-    st.sidebar.markdown("**Task 1:** Tumor / Normal prediction")
-    st.sidebar.markdown("**Task 2:** Genomic profile prediction")
-    st.sidebar.markdown("**Diffusion:** Conditional DDPM (100 steps)")
-    st.sidebar.markdown("**Test AUC:** 0.9467 | **Genomic MAE:** 0.3950")
+        dat_file = request.files['dat_file']
+        hea_file = request.files.get('hea_file')
+        atr_file = request.files.get('atr_file')
 
-    # ── STEP 1: Select image ──
-    st.subheader("Step 1 — Select Preloaded Test Image")
+        if dat_file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
 
-    if not samples:
-        st.warning(f"No samples found in {SAMPLES_DIR}")
-        return
+        record_name = os.path.splitext(dat_file.filename)[0]
 
-    selected   = st.selectbox(
-        "Choose a test patch",
-        samples,
-        format_func=lambda f: (
-            f"🔴 Tumor  — {f}" if f.startswith("tumor") else f"🟢 Normal — {f}"
+        # Save uploaded files
+        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+        dat_path = os.path.join(UPLOAD_FOLDER, dat_file.filename)
+        dat_file.save(dat_path)
+
+        if hea_file:
+            hea_path = os.path.join(UPLOAD_FOLDER, hea_file.filename)
+            hea_file.save(hea_path)
+
+        if atr_file:
+            atr_path = os.path.join(UPLOAD_FOLDER, atr_file.filename)
+            atr_file.save(atr_path)
+
+        record_path = os.path.join(UPLOAD_FOLDER, record_name)
+
+        if not os.path.exists(record_path + '.hea'):
+            return jsonify({
+                'error': 'Missing .hea file. '
+                         'Please upload .dat AND .hea files together.'
+            }), 400
+
+        # -----------------------------------------------
+        # Load and process ECG
+        # -----------------------------------------------
+
+        record     = wfdb.rdrecord(record_path)
+        ecg_signal = record.p_signal[:, 0]
+        fs         = record.fs
+
+        ecg_filtered = bandpass_filter(ecg_signal, fs=fs)
+        r_peaks      = detect_r_peaks(ecg_filtered, fs=fs)
+
+        # Load annotations if available
+        atr_exists  = os.path.exists(record_path + '.atr')
+        ann_samples = np.array([])
+        ann_symbols = np.array([])
+
+        if atr_exists:
+            annotation  = wfdb.rdann(record_path, 'atr')
+            ann_samples = annotation.sample
+            ann_symbols = annotation.symbol
+
+        # -----------------------------------------------
+        # Extract features + segments
+        # -----------------------------------------------
+
+        qrs_before   = int(0.050 * fs)
+        qrs_after    = int(0.050 * fs)
+        p_start      = int(0.200 * fs)
+        st_start     = int(0.080 * fs)
+        st_end       = int(0.120 * fs)
+        feature_cols = [
+            'rr_interval_ms', 'heart_rate_bpm', 'qrs_duration_ms',
+            'st_deviation_mv', 'rr_variability_ms', 'pr_interval_ms'
+        ]
+
+        features_list = []
+        segments_list = []
+        true_labels   = []
+        valid_r_peaks = []
+
+        for i, r in enumerate(r_peaks):
+            if i == 0:
+                continue
+            if (r - max(p_start, WINDOW_BEFORE)) < 0:
+                continue
+            if (r + max(st_end, WINDOW_AFTER)) >= len(ecg_filtered):
+                continue
+            try:
+                rr_samples     = int(r_peaks[i]) - int(r_peaks[i-1])
+                rr_interval    = (rr_samples / fs) * 1000
+                if rr_interval < 200 or rr_interval > 3000:
+                    continue
+                heart_rate     = round(60000 / rr_interval, 2)
+                qrs_duration   = round(
+                    ((qrs_before + qrs_after) / fs) * 1000, 2)
+                pr_interval    = round((p_start / fs) * 1000, 2)
+                st_segment     = ecg_filtered[r + st_start : r + st_end]
+                st_deviation   = round(float(np.mean(st_segment)), 4)
+                if i >= 2:
+                    prev_rr        = (int(r_peaks[i-1]) -
+                                      int(r_peaks[i-2])) / fs * 1000
+                    rr_variability = round(abs(rr_interval - prev_rr), 2)
+                else:
+                    rr_variability = 0.0
+
+                segment  = ecg_filtered[
+                    r - WINDOW_BEFORE : r + WINDOW_AFTER]
+                seg_min  = segment.min()
+                seg_max  = segment.max()
+                if seg_max - seg_min <= 0:
+                    continue
+                segment_norm = (2 * (segment - seg_min) /
+                                (seg_max - seg_min) - 1)
+
+                if atr_exists and len(ann_samples) > 0:
+                    distances   = np.abs(ann_samples - r)
+                    closest_idx = int(np.argmin(distances))
+                    if distances[closest_idx] < int(0.050 * fs):
+                        raw_label = ann_symbols[closest_idx]
+                        if raw_label in SKIP_LABELS:
+                            continue
+                        mapped = LABEL_MAP.get(raw_label, None)
+                        if mapped is None:
+                            continue
+                        true_labels.append(mapped)
+                    else:
+                        true_labels.append('Unknown')
+                else:
+                    true_labels.append('Unknown')
+
+                features_list.append({
+                    'r_peak_sample'    : int(r),
+                    'rr_interval_ms'   : round(rr_interval, 2),
+                    'heart_rate_bpm'   : heart_rate,
+                    'qrs_duration_ms'  : qrs_duration,
+                    'pr_interval_ms'   : pr_interval,
+                    'st_deviation_mv'  : st_deviation,
+                    'rr_variability_ms': rr_variability,
+                })
+                segments_list.append(segment_norm)
+                valid_r_peaks.append(r)
+
+            except Exception:
+                continue
+
+        features_df   = pd.DataFrame(features_list)
+        segments_arr  = np.array(segments_list)
+        valid_r_peaks = np.array(valid_r_peaks)
+        true_arr      = np.array(true_labels)
+
+        # -----------------------------------------------
+        # RF Predictions
+        # -----------------------------------------------
+
+        X_rf           = scaler.transform(
+            features_df[feature_cols].values)
+        rf_predictions = rf_model.predict(X_rf)
+        features_df['rf_predicted'] = rf_predictions
+
+        # -----------------------------------------------
+        # CNN Predictions
+        # -----------------------------------------------
+
+        X_cnn           = segments_arr.reshape(
+            segments_arr.shape[0], segments_arr.shape[1], 1)
+        cnn_pred_prob   = cnn_model.predict(X_cnn, verbose=0)
+        cnn_pred_idx    = np.argmax(cnn_pred_prob, axis=1)
+        cnn_predictions = encoder.inverse_transform(cnn_pred_idx)
+        features_df['cnn_predicted'] = cnn_predictions
+
+        # -----------------------------------------------
+        # Accuracy vs ground truth
+        # -----------------------------------------------
+
+        known_mask  = true_arr != 'Unknown'
+        known_count = known_mask.sum()
+        rf_acc      = None
+        cnn_acc     = None
+
+        if known_count > 0:
+            rf_acc  = (rf_predictions[known_mask] ==
+                       true_arr[known_mask]).mean()
+            cnn_acc = (cnn_predictions[known_mask] ==
+                       true_arr[known_mask]).mean()
+
+        per_class = {}
+        if known_count > 0:
+            for label in ['N', 'A', 'V']:
+                mask = true_arr[known_mask] == label
+                if mask.sum() > 0:
+                    per_class[label] = {
+                        'count'  : int(mask.sum()),
+                        'rf_acc' : round(float(
+                            (rf_predictions[known_mask][mask] ==
+                             label).mean()) * 100, 1),
+                        'cnn_acc': round(float(
+                            (cnn_predictions[known_mask][mask] ==
+                             label).mean()) * 100, 1),
+                    }
+
+        # -----------------------------------------------
+        # Verdict + Risk + Explanation
+        # -----------------------------------------------
+
+        verdict_data = get_verdict(rf_predictions, cnn_predictions)
+        rf_risk      = assess_risk(rf_predictions)
+        cnn_risk     = assess_risk(cnn_predictions)
+        explanation  = generate_explanation(
+            rf_predictions, cnn_predictions,
+            features_df, verdict_data,
+            rf_risk, cnn_risk
         )
-    )
-    pil_img    = Image.open(os.path.join(SAMPLES_DIR, selected))
-    image_idx  = extract_idx(selected)
-    true_label = "TUMOR" if selected.startswith("tumor") else "NORMAL"
-    enh_img    = enhance_image(pil_img) if enhance else pil_img
 
-    # Show original vs enhanced
-    col_o, col_e = st.columns(2)
-    with col_o:
-        st.image(pil_img, width=160, caption="Original patch")
-    with col_e:
-        st.image(enh_img, width=160,
-                 caption="Enhanced (CLAHE + Sharpen)" if enhance else "No enhancement")
+        # -----------------------------------------------
+        # Beat counts + clinical stats
+        # -----------------------------------------------
 
-    true_color = "#e74c3c" if true_label=="TUMOR" else "#27ae60"
-    st.markdown(
-        f"**Ground truth:** "
-        f"<span style='background:{true_color};color:white;"
-        f"padding:3px 12px;border-radius:4px;'>{true_label}</span> &nbsp;"
-        f"**Index:** `{image_idx}`",
-        unsafe_allow_html=True
-    )
+        rf_counts  = pd.Series(rf_predictions).value_counts().to_dict()
+        cnn_counts = pd.Series(cnn_predictions).value_counts().to_dict()
 
-    # ── STEP 2: Predict ──
-    st.markdown("---")
-    st.subheader("Step 2 — Run Analysis")
+        avg_hr = round(float(features_df['heart_rate_bpm'].mean()), 1)
+        min_hr = round(float(features_df['heart_rate_bpm'].min()),  1)
+        max_hr = round(float(features_df['heart_rate_bpm'].max()),  1)
+        avg_st = round(float(features_df['st_deviation_mv'].mean()), 4)
+        avg_rr = round(float(features_df['rr_interval_ms'].mean()),  1)
 
-    if st.button("🔍 Analyze", type="primary", use_container_width=True):
-
-        img_tensor, img_np = preprocess(enh_img)
-
-        # Multi-task inference — image only
-        classifier.eval()
-        with torch.no_grad():
-            cls_logits, genomic_pred = classifier(img_tensor.unsqueeze(0))
-            probs      = torch.softmax(cls_logits, dim=1)[0]
-            pred_class = cls_logits.argmax(dim=1).item()
-            confidence = probs[pred_class].item()
-            genomic_vals = genomic_pred.squeeze(0).numpy()
-
-        label = "TUMOR" if pred_class == 1 else "NORMAL"
-
-        # ── Prediction result ──
-        color = "#e74c3c" if label=="TUMOR" else "#27ae60"
-        st.markdown(f"""
-        <div style='background:{color};padding:20px;border-radius:10px;
-                    text-align:center;margin:10px 0;'>
-            <h2 style='color:white;margin:0;'>{label}</h2>
-            <p style='color:white;margin:4px 0 0;font-size:18px;'>
-                Confidence: {confidence:.2%}
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric("Normal", f"{probs[0].item():.2%}")
-            st.progress(float(probs[0].item()))
-        with c2:
-            st.metric("Tumor", f"{probs[1].item():.2%}")
-            st.progress(float(probs[1].item()))
-
-        st.markdown("---")
-
-        # ── Grad-CAM ──
-        st.subheader("🔥 Grad-CAM — Region Focus")
-        cam = gradcam.generate(img_tensor, class_idx=pred_class)
-        fig, axes = plt.subplots(1, 3, figsize=(10,3))
-        axes[0].imshow(np.clip(img_np,0,1)); axes[0].set_title("Original"); axes[0].axis("off")
-        axes[1].imshow(cam, cmap="jet");     axes[1].set_title("Grad-CAM"); axes[1].axis("off")
-        axes[2].imshow(np.clip(img_np,0,1))
-        axes[2].imshow(cam, cmap="jet", alpha=0.45)
-        axes[2].set_title("Overlay"); axes[2].axis("off")
-        plt.tight_layout()
-        st.pyplot(fig); plt.close()
-
-        st.markdown("---")
-
-        # ── Diffusion model ──
-        st.markdown("""
-        <div style='background:#0d1b2a;border:2px solid #00d4ff;
-                    border-radius:12px;padding:16px;margin:10px 0;'>
-            <h3 style='color:#00d4ff;margin:0 0 4px 0;'>
-                🧬 Diffusion Model — Synthetic Patch Generation
-            </h3>
-            <p style='color:#aaa;margin:0;font-size:13px;'>
-                Conditional DDPM · 100 denoising timesteps ·
-                Conditioned on predicted genomic profile · 32×32 → 96×96
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-
-        if gen_diff:
-            with st.spinner("Running diffusion model (100 timesteps)..."):
-                genomic_tensor = torch.tensor(genomic_vals, dtype=torch.float32)
-                syn_patch = generate_synthetic(
-                    diff_model, genomic_tensor, betas, alphas, alpha_bars
-                )
-
-            col_r, col_g = st.columns(2)
-            with col_r:
-                st.image(np.clip(img_np,0,1),
-                         caption="Real patch (input)",
-                         width=300)
-                st.markdown(
-                    "<p style='text-align:center;color:#888;font-size:12px;'>"
-                    "Source: PCam test set</p>",
-                    unsafe_allow_html=True
-                )
-            with col_g:
-                st.image(np.clip(syn_patch,0,1),
-                         caption="🧬 Diffusion-generated patch",
-                         width=300)
-                st.markdown(
-                    "<p style='text-align:center;color:#00d4ff;font-size:12px;'>"
-                    "Generated by Conditional DDPM<br>"
-                    "conditioned on predicted genomic profile</p>",
-                    unsafe_allow_html=True
-                )
-
-            st.markdown("""
-            <div style='background:#1a1a2e;border-left:4px solid #00d4ff;
-                        padding:10px 14px;border-radius:6px;margin-top:8px;'>
-                <p style='color:#ccc;margin:0;font-size:13px;'>
-                    <b style='color:#00d4ff;'>How this works:</b>
-                    The MultiTaskOmicsNet first predicts the genomic profile
-                    from the image. The diffusion model then uses this predicted
-                    profile as a condition to generate a synthetic patch —
-                    showing what tissue with that genomic signature looks like.
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
+        if avg_hr < 60:
+            hr_status = 'BRADYCARDIA'
+        elif avg_hr > 100:
+            hr_status = 'TACHYCARDIA'
         else:
-            st.info("Enable 'Generate diffusion patch' in sidebar to see this.")
+            hr_status = 'NORMAL'
 
-        st.markdown("---")
+        st_status = 'ABNORMAL' if abs(avg_st) > 0.1 else 'NORMAL'
 
-        # ── Predicted Omics Profile ──
-        st.subheader("🧬 Predicted Omics Profile")
-        st.caption("Predicted directly from image by MultiTaskOmicsNet — no database lookup")
+        agree     = int((rf_predictions == cnn_predictions).sum())
+        agree_pct = round(agree / len(rf_predictions) * 100, 1)
 
-        risk       = float(genomic_vals[5])
-        risk_label = "High" if risk > 0.6 else "Medium" if risk > 0.3 else "Low"
-        risk_color = "#e74c3c" if risk > 0.6 else "#f39c12" if risk > 0.3 else "#27ae60"
+        # -----------------------------------------------
+        # Generate ECG plot
+        # -----------------------------------------------
 
-        st.markdown(f"""
-        <div style='background:#f8f9fa;padding:12px;border-radius:8px;
-                    border-left:4px solid {risk_color};margin-bottom:14px;'>
-            <b>Predicted Genomic Risk:
-            <span style='color:{risk_color}'>{risk_label} ({risk:.3f})</span></b>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # Mutation badges with actual predicted values
-        mut_cols = st.columns(5)
-        for i, (feat, display) in enumerate(zip(
-            ["BRCA1_mutation","TP53_mutation","HER2_amplification",
-             "PIK3CA_mutation","CDH1_mutation"],
-            ["BRCA1","TP53","HER2","PIK3CA","CDH1"]
-        )):
-            raw_val  = float(genomic_vals[i])
-            bin_val  = 1 if raw_val >= 0.5 else 0
-            mcolor   = "#e74c3c" if bin_val == 1 else "#27ae60"
-            mut_cols[i].markdown(
-                f"<div style='text-align:center;background:{mcolor};"
-                f"color:white;padding:10px 4px;border-radius:8px;'>"
-                f"<b style='font-size:13px;'>{display}</b><br>"
-                f"<span style='font-size:11px;'>{'Mutated' if bin_val==1 else 'Normal'}</span><br>"
-                f"<b style='font-size:16px;'>{raw_val:.3f}</b></div>",
-                unsafe_allow_html=True
-            )
-
-        # Full genomic table
-        st.markdown("<br>", unsafe_allow_html=True)
-        gdf = pd.DataFrame([{
-            "Feature"        : lbl,
-            "Predicted Value": round(float(genomic_vals[i]), 4),
-            "Binary"         : str(1 if (i < 5 and genomic_vals[i] >= 0.5) else
-                                   ("N/A" if i == 5 else 0)),
-            "Status"         : ("Mutated" if (i < 5 and genomic_vals[i] >= 0.5)
-                                else ("High"   if (i==5 and genomic_vals[i] > 0.6)
-                                      else ("Medium" if (i==5 and genomic_vals[i] > 0.3)
-                                            else ("Low" if i==5 else "Normal"))))
-        } for i, lbl in enumerate(GENOMIC_LABELS)])
-        st.dataframe(gdf, use_container_width=True, hide_index=True)
-
-        st.markdown("---")
-
-        # ── Excel download ──
-        excel_buf = make_excel(image_idx, selected, label, confidence, genomic_vals)
-        st.download_button(
-            label="📥 Download Excel Report",
-            data=excel_buf,
-            file_name=f"omicsguided_{selected}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
+        ecg_plot = generate_ecg_plot(
+            ecg_filtered, valid_r_peaks,
+            rf_predictions, fs
         )
 
+        # Heart rate time series
+        time_minutes = (features_df['r_peak_sample'] /
+                        fs / 60).tolist()
+        hr_values    = features_df['heart_rate_bpm'].tolist()
+        hr_labels    = features_df['rf_predicted'].tolist()
 
-if __name__ == "__main__":
-    main()
+        # -----------------------------------------------
+        # Return all results
+        # -----------------------------------------------
+
+        return jsonify({
+            'success'     : True,
+            'record_name' : record_name,
+            'duration_min': round(len(ecg_signal) / fs / 60, 1),
+            'total_beats' : len(features_df),
+            'r_peaks'     : len(r_peaks),
+
+            # Verdict
+            'verdict'     : verdict_data,
+
+            # Risk
+            'rf_risk'     : rf_risk,
+            'cnn_risk'    : cnn_risk,
+
+            # Beat counts
+            'rf_counts'   : rf_counts,
+            'cnn_counts'  : cnn_counts,
+
+            # Accuracy
+            'rf_acc'      : round(rf_acc  * 100, 1) if rf_acc  else None,
+            'cnn_acc'     : round(cnn_acc * 100, 1) if cnn_acc else None,
+            'per_class'   : per_class,
+
+            # Clinical stats
+            'avg_hr'      : avg_hr,
+            'min_hr'      : min_hr,
+            'max_hr'      : max_hr,
+            'hr_status'   : hr_status,
+            'avg_st'      : avg_st,
+            'st_status'   : st_status,
+            'avg_rr'      : avg_rr,
+
+            # Model agreement
+            'agree_pct'   : agree_pct,
+
+            # ECG plot (base64)
+            'ecg_plot'    : ecg_plot,
+
+            # Heart rate time series
+            'time_minutes': time_minutes,
+            'hr_values'   : hr_values,
+            'hr_labels'   : hr_labels,
+
+            # Full explanation
+            'explanation' : explanation,
+        })
+
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"ERROR: {error_details}")
+        return jsonify({'error': str(e), 'details': error_details}), 500
+
+# -------------------------------------------------------
+# SECTION 5: Run App
+# -------------------------------------------------------
+
+if __name__ == '__main__':
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    print("\n" + "="*50)
+    print("  ECG Arrhythmia Detection Web App")
+    print("="*50)
+    print("  Open browser at: http://localhost:5000")
