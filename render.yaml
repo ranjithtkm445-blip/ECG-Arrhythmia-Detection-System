@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: ecg-arrhythmia-detection
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: TF_CPP_MIN_LOG_LEVEL
+        value: 3
