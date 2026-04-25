@@ -1,0 +1,890 @@
+/* style.css
+   Purpose: Complete dark theme styling for ECG Arrhythmia Detection Web App
+   Includes: Upload, Loading, Results, Charts, Clinical Summary, Explanation
+*/
+
+/* ================================================ */
+/* RESET + BASE                                     */
+/* ================================================ */
+
+* {
+  margin     : 0;
+  padding    : 0;
+  box-sizing : border-box;
+}
+
+:root {
+  --bg-primary    : #0f1117;
+  --bg-secondary  : #1a1a2e;
+  --bg-card       : #16213e;
+  --bg-panel      : #1e2a3a;
+  --border-color  : #2a3a4a;
+  --text-primary  : #ffffff;
+  --text-secondary: #aaaaaa;
+  --text-muted    : #666666;
+  --green         : #2ecc71;
+  --orange        : #e67e22;
+  --red           : #e74c3c;
+  --blue          : #3498db;
+  --purple        : #9b59b6;
+  --yellow        : #f1c40f;
+  --green-bg      : #0a2d1a;
+  --orange-bg     : #2d1a00;
+  --red-bg        : #2d0a0a;
+  --font-main     : 'Segoe UI', system-ui, sans-serif;
+  --font-mono     : 'Consolas', 'Courier New', monospace;
+  --radius-sm     : 6px;
+  --radius-md     : 10px;
+  --radius-lg     : 16px;
+  --shadow        : 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family : var(--font-main);
+  background  : var(--bg-primary);
+  color       : var(--text-primary);
+  min-height  : 100vh;
+  line-height : 1.6;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* ================================================ */
+/* HEADER                                           */
+/* ================================================ */
+
+header {
+  background    : var(--bg-secondary);
+  border-bottom : 1px solid var(--border-color);
+  padding       : 1rem 2rem;
+  position      : sticky;
+  top           : 0;
+  z-index       : 100;
+}
+
+.header-inner {
+  max-width       : 1400px;
+  margin          : 0 auto;
+  display         : flex;
+  align-items     : center;
+  justify-content : space-between;
+  flex-wrap       : wrap;
+  gap             : 1rem;
+}
+
+.header-left {
+  display     : flex;
+  align-items : center;
+  gap         : 12px;
+}
+
+.header-icon {
+  font-size : 2rem;
+  color     : var(--red);
+  animation : heartbeat 1.5s ease-in-out infinite;
+}
+
+@keyframes heartbeat {
+  0%, 100% { transform: scale(1);    }
+  50%       { transform: scale(1.15); }
+}
+
+header h1 {
+  font-size   : 1.4rem;
+  font-weight : 700;
+  color       : var(--text-primary);
+}
+
+header p {
+  font-size : 0.8rem;
+  color     : var(--text-secondary);
+}
+
+.header-badges {
+  display   : flex;
+  gap       : 8px;
+  flex-wrap : wrap;
+}
+
+.badge {
+  font-size     : 0.75rem;
+  padding       : 4px 12px;
+  border-radius : 20px;
+  font-weight   : 500;
+}
+
+.badge-blue {
+  background : rgba(52,152,219,0.2);
+  color      : #74b9ff;
+  border     : 1px solid rgba(52,152,219,0.4);
+}
+
+.badge-purple {
+  background : rgba(155,89,182,0.2);
+  color      : #c39bd3;
+  border     : 1px solid rgba(155,89,182,0.4);
+}
+
+.badge-green {
+  background : rgba(46,204,113,0.2);
+  color      : #82e0aa;
+  border     : 1px solid rgba(46,204,113,0.4);
+}
+
+/* ================================================ */
+/* MAIN                                             */
+/* ================================================ */
+
+main {
+  max-width : 1400px;
+  margin    : 0 auto;
+  padding   : 2rem;
+}
+
+/* ================================================ */
+/* UPLOAD SECTION                                   */
+/* ================================================ */
+
+.upload-section {
+  display         : flex;
+  justify-content : center;
+  padding         : 3rem 0;
+}
+
+.upload-card {
+  background    : var(--bg-secondary);
+  border        : 1px solid var(--border-color);
+  border-radius : var(--radius-lg);
+  padding       : 2.5rem;
+  width         : 100%;
+  max-width     : 600px;
+  text-align    : center;
+  box-shadow    : var(--shadow);
+}
+
+.upload-icon {
+  font-size     : 3rem;
+  margin-bottom : 1rem;
+}
+
+.upload-card h2 {
+  font-size     : 1.5rem;
+  margin-bottom : 0.5rem;
+}
+
+.upload-hint {
+  color         : var(--text-secondary);
+  font-size     : 0.9rem;
+  margin-bottom : 1.5rem;
+}
+
+.upload-drop-zone {
+  border        : 2px dashed var(--border-color);
+  border-radius : var(--radius-md);
+  padding       : 2rem;
+  cursor        : pointer;
+  transition    : all 0.3s;
+  position      : relative;
+  margin-bottom : 1rem;
+}
+
+.upload-drop-zone:hover,
+.upload-drop-zone.drag-over {
+  border-color : var(--blue);
+  background   : rgba(52, 152, 219, 0.05);
+}
+
+.upload-drop-zone input[type="file"] {
+  position : absolute;
+  inset    : 0;
+  opacity  : 0;
+  cursor   : pointer;
+  width    : 100%;
+  height   : 100%;
+}
+
+.drop-icon {
+  font-size     : 2rem;
+  display       : block;
+  margin-bottom : 0.5rem;
+}
+
+.drop-content p {
+  color     : var(--text-secondary);
+  font-size : 0.95rem;
+}
+
+.drop-sub {
+  font-size  : 0.8rem !important;
+  color      : var(--text-muted) !important;
+  margin-top : 4px;
+}
+
+/* File list */
+.file-list {
+  margin-bottom : 1.5rem;
+  text-align    : left;
+}
+
+.file-item {
+  display       : flex;
+  align-items   : center;
+  gap           : 8px;
+  padding       : 8px 12px;
+  background    : var(--bg-primary);
+  border-radius : var(--radius-sm);
+  margin-bottom : 6px;
+  font-size     : 0.85rem;
+  border        : 1px solid var(--border-color);
+}
+
+.file-item .file-icon  { font-size: 1rem; }
+.file-item .file-name  { flex: 1; color: var(--text-primary); }
+.file-item .file-size  { color: var(--text-muted); font-size: 0.75rem; }
+.file-item .file-check { color: var(--green); }
+
+/* Analyze button */
+.btn-analyze {
+  width          : 100%;
+  padding        : 14px;
+  background     : linear-gradient(135deg, var(--blue), var(--purple));
+  color          : white;
+  border         : none;
+  border-radius  : var(--radius-md);
+  font-size      : 1rem;
+  font-weight    : 600;
+  cursor         : pointer;
+  transition     : all 0.3s;
+  letter-spacing : 0.5px;
+}
+
+.btn-analyze:hover:not(:disabled) {
+  transform  : translateY(-2px);
+  box-shadow : 0 6px 20px rgba(52, 152, 219, 0.4);
+}
+
+.btn-analyze:disabled {
+  opacity : 0.4;
+  cursor  : not-allowed;
+}
+
+/* ================================================ */
+/* LOADING SECTION                                  */
+/* ================================================ */
+
+.loading-section {
+  display         : flex;
+  justify-content : center;
+  padding         : 3rem 0;
+}
+
+.loading-card {
+  background    : var(--bg-secondary);
+  border        : 1px solid var(--border-color);
+  border-radius : var(--radius-lg);
+  padding       : 2.5rem;
+  width         : 100%;
+  max-width     : 500px;
+  text-align    : center;
+}
+
+.spinner {
+  width         : 60px;
+  height        : 60px;
+  border        : 4px solid var(--border-color);
+  border-top    : 4px solid var(--blue);
+  border-radius : 50%;
+  animation     : spin 1s linear infinite;
+  margin        : 0 auto 1.5rem;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.loading-card h3 {
+  color         : var(--text-primary);
+  margin-bottom : 1.5rem;
+}
+
+.loading-steps {
+  text-align : left;
+}
+
+.loading-step {
+  padding       : 6px 12px;
+  margin-bottom : 6px;
+  border-radius : var(--radius-sm);
+  font-size     : 0.85rem;
+  color         : var(--text-muted);
+  background    : var(--bg-primary);
+  border        : 1px solid var(--border-color);
+  transition    : all 0.3s;
+}
+
+.loading-step.active {
+  color        : var(--blue);
+  border-color : var(--blue);
+  background   : rgba(52, 152, 219, 0.1);
+}
+
+.loading-step.done {
+  color        : var(--green);
+  border-color : var(--green);
+  background   : rgba(46, 204, 113, 0.1);
+}
+
+/* ================================================ */
+/* VERDICT BANNER                                   */
+/* ================================================ */
+
+.verdict-banner {
+  display       : flex;
+  align-items   : center;
+  gap           : 1.5rem;
+  padding       : 1.5rem 2rem;
+  border-radius : var(--radius-lg);
+  margin-bottom : 1.5rem;
+  border        : 2px solid;
+  box-shadow    : var(--shadow);
+}
+
+.verdict-banner.success {
+  background   : var(--green-bg);
+  border-color : var(--green);
+}
+
+.verdict-banner.warning {
+  background   : var(--orange-bg);
+  border-color : var(--orange);
+}
+
+.verdict-banner.danger {
+  background   : var(--red-bg);
+  border-color : var(--red);
+}
+
+.verdict-icon {
+  font-size   : 3rem;
+  flex-shrink : 0;
+}
+
+.verdict-banner.success .verdict-text h2 { color: var(--green);  }
+.verdict-banner.warning .verdict-text h2 { color: var(--orange); }
+.verdict-banner.danger  .verdict-text h2 { color: var(--red);    }
+
+.verdict-text h2 {
+  font-size      : 1.6rem;
+  font-weight    : 800;
+  margin-bottom  : 4px;
+  letter-spacing : 0.5px;
+}
+
+.verdict-text p {
+  color     : var(--text-secondary);
+  font-size : 0.95rem;
+}
+
+/* ================================================ */
+/* INFO BAR                                         */
+/* ================================================ */
+
+.info-bar {
+  display       : flex;
+  gap           : 1px;
+  background    : var(--border-color);
+  border-radius : var(--radius-md);
+  overflow      : hidden;
+  margin-bottom : 1.5rem;
+  border        : 1px solid var(--border-color);
+}
+
+.info-item {
+  flex            : 1;
+  display         : flex;
+  flex-direction  : column;
+  align-items     : center;
+  padding         : 12px;
+  background      : var(--bg-secondary);
+  text-align      : center;
+  min-width       : 0;
+}
+
+.info-label {
+  font-size      : 0.7rem;
+  color          : var(--text-muted);
+  text-transform : uppercase;
+  letter-spacing : 0.05em;
+  margin-bottom  : 4px;
+}
+
+.info-value {
+  font-size   : 1rem;
+  font-weight : 600;
+  color       : var(--text-primary);
+}
+
+/* ================================================ */
+/* PANELS                                           */
+/* ================================================ */
+
+.panel {
+  background    : var(--bg-secondary);
+  border        : 1px solid var(--border-color);
+  border-radius : var(--radius-lg);
+  padding       : 1.5rem;
+  margin-bottom : 1.5rem;
+  box-shadow    : var(--shadow);
+}
+
+.panel-title {
+  font-size      : 1rem;
+  font-weight    : 600;
+  margin-bottom  : 1rem;
+  color          : var(--text-primary);
+  padding-bottom : 0.75rem;
+  border-bottom  : 1px solid var(--border-color);
+}
+
+/* ECG plot */
+.ecg-container img {
+  width         : 100%;
+  border-radius : var(--radius-md);
+  display       : block;
+}
+
+.ecg-legend {
+  display     : flex;
+  gap         : 1.5rem;
+  margin-top  : 0.75rem;
+  font-size   : 0.85rem;
+  color       : var(--text-secondary);
+  align-items : center;
+}
+
+.legend-dot {
+  display       : inline-block;
+  width         : 12px;
+  height        : 12px;
+  border-radius : 50%;
+  margin-right  : 4px;
+}
+
+.legend-dot.green  { background: var(--green);  }
+.legend-dot.orange { background: var(--orange); }
+.legend-dot.red    { background: var(--red);    }
+
+/* Charts row */
+.charts-row {
+  display               : grid;
+  grid-template-columns : repeat(3, 1fr);
+  gap                   : 1.5rem;
+  margin-bottom         : 1.5rem;
+}
+
+.panel-third {
+  margin-bottom : 0;
+}
+
+.chart-container {
+  position : relative;
+  height   : 220px;
+}
+
+.chart-container-wide {
+  position : relative;
+  height   : 250px;
+}
+
+/* Bottom row */
+.bottom-row {
+  display               : grid;
+  grid-template-columns : 1fr 1fr;
+  gap                   : 1.5rem;
+  margin-bottom         : 1.5rem;
+}
+
+.panel-half {
+  margin-bottom : 0;
+}
+
+/* ================================================ */
+/* CLINICAL SUMMARY                                 */
+/* ================================================ */
+
+.summary-grid {
+  display               : grid;
+  grid-template-columns : 1fr 1fr;
+  gap                   : 12px;
+}
+
+.summary-item {
+  background    : var(--bg-primary);
+  border        : 1px solid var(--border-color);
+  border-radius : var(--radius-md);
+  padding       : 12px;
+  display       : flex;
+  flex-direction: column;
+  gap           : 4px;
+}
+
+.summary-label {
+  font-size      : 0.7rem;
+  color          : var(--text-muted);
+  text-transform : uppercase;
+  letter-spacing : 0.05em;
+}
+
+.summary-value {
+  font-size   : 1.1rem;
+  font-weight : 600;
+  color       : var(--text-primary);
+  font-family : var(--font-mono);
+}
+
+.summary-status {
+  font-size     : 0.75rem;
+  font-weight   : 600;
+  padding       : 2px 8px;
+  border-radius : 4px;
+  display       : inline-block;
+  width         : fit-content;
+}
+
+.status-normal   { background: rgba(46,204,113,0.2); color: var(--green);  }
+.status-abnormal { background: rgba(231,76,60,0.2);  color: var(--red);    }
+.status-warning  { background: rgba(230,126,34,0.2); color: var(--orange); }
+
+.status-risk-low {
+  background : rgba(46,204,113,0.2);
+  color      : var(--green);
+}
+.status-risk-moderate {
+  background : rgba(230,126,34,0.2);
+  color      : var(--orange);
+}
+.status-risk-high {
+  background : rgba(231,76,60,0.2);
+  color      : var(--red);
+}
+
+/* ================================================ */
+/* PER CLASS TABLE                                  */
+/* ================================================ */
+
+.per-class-table {
+  margin-top : 1rem;
+}
+
+.per-class-row {
+  display       : flex;
+  align-items   : center;
+  gap           : 10px;
+  padding       : 8px 0;
+  border-bottom : 1px solid var(--border-color);
+  font-size     : 0.85rem;
+}
+
+.per-class-row:last-child {
+  border-bottom : none;
+}
+
+.per-class-label {
+  width       : 80px;
+  font-weight : 600;
+  display     : flex;
+  align-items : center;
+  gap         : 6px;
+}
+
+.per-class-dot {
+  width         : 10px;
+  height        : 10px;
+  border-radius : 50%;
+  flex-shrink   : 0;
+}
+
+.per-class-bars {
+  flex            : 1;
+  display         : flex;
+  flex-direction  : column;
+  gap             : 4px;
+}
+
+.per-class-bar-row {
+  display     : flex;
+  align-items : center;
+  gap         : 8px;
+  font-size   : 0.75rem;
+}
+
+.per-class-bar-label {
+  width : 30px;
+  color : var(--text-muted);
+}
+
+.per-class-bar-bg {
+  flex          : 1;
+  height        : 8px;
+  background    : var(--bg-primary);
+  border-radius : 4px;
+  overflow      : hidden;
+}
+
+.per-class-bar-fill {
+  height        : 100%;
+  border-radius : 4px;
+  transition    : width 1s ease;
+}
+
+.per-class-bar-val {
+  width      : 40px;
+  text-align : right;
+  color      : var(--text-secondary);
+}
+
+.per-class-count {
+  width      : 70px;
+  text-align : right;
+  color      : var(--text-muted);
+  font-size  : 0.75rem;
+}
+
+/* ================================================ */
+/* EXPLANATION PANEL                                */
+/* ================================================ */
+
+.explanation-section {
+  margin-bottom  : 1.5rem;
+  padding-bottom : 1.5rem;
+  border-bottom  : 1px solid var(--border-color);
+}
+
+.explanation-section:last-of-type {
+  border-bottom : none;
+  margin-bottom : 0;
+}
+
+.exp-title {
+  font-size     : 0.95rem;
+  font-weight   : 600;
+  color         : var(--text-primary);
+  margin-bottom : 0.75rem;
+  display       : flex;
+  align-items   : center;
+  gap           : 8px;
+}
+
+.exp-icon {
+  font-size : 1.1rem;
+}
+
+.exp-list {
+  list-style      : none;
+  display         : flex;
+  flex-direction  : column;
+  gap             : 8px;
+}
+
+.exp-list li {
+  display       : flex;
+  align-items   : flex-start;
+  gap           : 10px;
+  font-size     : 0.9rem;
+  color         : var(--text-secondary);
+  padding       : 10px 14px;
+  background    : var(--bg-primary);
+  border-radius : var(--radius-sm);
+  border-left   : 3px solid var(--blue);
+  line-height   : 1.5;
+}
+
+.exp-list li::before {
+  content     : '→';
+  color       : var(--blue);
+  font-weight : 700;
+  flex-shrink : 0;
+}
+
+.exp-steps li {
+  border-left-color : var(--green);
+}
+
+.exp-steps li::before {
+  color : var(--green);
+}
+
+/* Beat breakdown cards */
+.breakdown-grid {
+  display               : grid;
+  grid-template-columns : repeat(3, 1fr);
+  gap                   : 12px;
+}
+
+.breakdown-card {
+  background    : var(--bg-primary);
+  border        : 1px solid var(--border-color);
+  border-radius : var(--radius-md);
+  padding       : 14px;
+  border-top    : 3px solid;
+}
+
+.breakdown-card.green  { border-top-color: var(--green);  }
+.breakdown-card.orange { border-top-color: var(--orange); }
+.breakdown-card.red    { border-top-color: var(--red);    }
+
+.breakdown-type {
+  font-size     : 0.85rem;
+  font-weight   : 600;
+  margin-bottom : 8px;
+}
+
+.breakdown-card.green  .breakdown-type { color: var(--green);  }
+.breakdown-card.orange .breakdown-type { color: var(--orange); }
+.breakdown-card.red    .breakdown-type { color: var(--red);    }
+
+.breakdown-counts {
+  display         : flex;
+  justify-content : space-between;
+  margin-bottom   : 6px;
+  font-size       : 0.8rem;
+  color           : var(--text-muted);
+}
+
+.breakdown-pct {
+  font-size     : 1.6rem;
+  font-weight   : 700;
+  color         : var(--text-primary);
+  font-family   : var(--font-mono);
+  margin-bottom : 6px;
+}
+
+.breakdown-meaning {
+  font-size   : 0.75rem;
+  color       : var(--text-muted);
+  line-height : 1.4;
+}
+
+.breakdown-bar-bg {
+  height        : 6px;
+  background    : var(--border-color);
+  border-radius : 3px;
+  margin-top    : 8px;
+  overflow      : hidden;
+}
+
+.breakdown-bar-fill {
+  height        : 100%;
+  border-radius : 3px;
+  transition    : width 1s ease;
+}
+
+/* Clinical interpretation */
+.exp-clinical {
+  display         : flex;
+  flex-direction  : column;
+  gap             : 10px;
+}
+
+.clinical-item {
+  font-size     : 0.9rem;
+  color         : var(--text-secondary);
+  padding       : 12px 16px;
+  background    : var(--bg-primary);
+  border-radius : var(--radius-sm);
+  border-left   : 3px solid var(--purple);
+  line-height   : 1.6;
+}
+
+/* Disclaimer */
+.exp-disclaimer {
+  margin-top    : 1.5rem;
+  padding       : 14px 16px;
+  background    : rgba(241, 196, 15, 0.08);
+  border        : 1px solid rgba(241, 196, 15, 0.3);
+  border-radius : var(--radius-md);
+  font-size     : 0.82rem;
+  color         : #f1c40f;
+  line-height   : 1.6;
+}
+
+/* ================================================ */
+/* ANALYZE ANOTHER                                  */
+/* ================================================ */
+
+.analyze-another {
+  text-align    : center;
+  margin-bottom : 2rem;
+}
+
+.btn-reset {
+  padding       : 12px 32px;
+  background    : transparent;
+  color         : var(--blue);
+  border        : 2px solid var(--blue);
+  border-radius : var(--radius-md);
+  font-size     : 1rem;
+  font-weight   : 600;
+  cursor        : pointer;
+  transition    : all 0.3s;
+}
+
+.btn-reset:hover {
+  background : rgba(52, 152, 219, 0.1);
+  transform  : translateY(-2px);
+}
+
+/* ================================================ */
+/* FOOTER                                           */
+/* ================================================ */
+
+footer {
+  text-align  : center;
+  padding     : 1.5rem;
+  border-top  : 1px solid var(--border-color);
+  color       : var(--text-muted);
+  font-size   : 0.8rem;
+}
+
+/* ================================================ */
+/* RESPONSIVE                                       */
+/* ================================================ */
+
+@media (max-width: 900px) {
+  .charts-row {
+    grid-template-columns : 1fr;
+  }
+  .bottom-row {
+    grid-template-columns : 1fr;
+  }
+  .info-bar {
+    flex-wrap : wrap;
+  }
+  .info-item {
+    min-width : 45%;
+  }
+  .breakdown-grid {
+    grid-template-columns : 1fr;
+  }
+}
+
+@media (max-width: 600px) {
+  main {
+    padding : 1rem;
+  }
+  .verdict-text h2 {
+    font-size : 1.1rem;
+  }
+  .summary-grid {
+    grid-template-columns : 1fr;
+  }
+  .breakdown-grid {
+    grid-template-columns : 1fr;
+  }
+}
